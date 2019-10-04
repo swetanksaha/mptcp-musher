@@ -963,6 +963,11 @@ extern struct mptcp_sched_probe* mptcp_sched_probe_log_hook(struct mptcp_sched_p
 extern struct mptcp_queue_probe* mptcp_queue_probe_log_hook(u8 q_id, struct tcp_sock *meta_tp, struct sk_buff *skb, u8 op_id);
 #endif
 
+#if IS_ENABLED(CONFIG_MPTCP_RATIO)
+struct sock *ratio_get_available_subflow(struct sock *meta_sk, struct sk_buff *skb, bool zero_wnd_test);
+struct sk_buff *mptcp_ratio_next_segment(struct sock *meta_sk, int *reinject, struct sock **subsk, unsigned int *limit);
+#endif
+
 /* Initializes function-pointers and MPTCP-flags */
 static inline void mptcp_init_tcp_sock(struct sock *sk)
 {

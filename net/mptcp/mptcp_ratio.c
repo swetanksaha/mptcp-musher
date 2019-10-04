@@ -99,7 +99,7 @@ static int mptcp_ratio_dont_reinject_skb(const struct tcp_sock *tp, const struct
 }
 
 /* We just look for any subflow that is available */
-static struct sock *ratio_get_available_subflow(struct sock *meta_sk,
+struct sock *ratio_get_available_subflow(struct sock *meta_sk,
 					     struct sk_buff *skb,
 					     bool zero_wnd_test)
 {
@@ -144,6 +144,7 @@ static struct sock *ratio_get_available_subflow(struct sock *meta_sk,
 
 	return sk;
 }
+EXPORT_SYMBOL_GPL(ratio_get_available_subflow);
 
 /* Returns the next segment to be sent from the mptcp meta-queue.
  * (chooses the reinject queue if any segment is waiting in it, otherwise,
@@ -201,7 +202,7 @@ static int choose_subflow(struct ratiosched_priv *rsp, struct sock *sk_it, unsig
         return 0;
 }
 
-static struct sk_buff *mptcp_ratio_next_segment(struct sock *meta_sk,
+struct sk_buff *mptcp_ratio_next_segment(struct sock *meta_sk,
 					     int *reinject,
 					     struct sock **subsk,
 					     unsigned int *limit)
@@ -294,6 +295,7 @@ found:
 
 	return NULL;
 }
+EXPORT_SYMBOL_GPL(mptcp_ratio_next_segment);
 
 static struct mptcp_sched_ops mptcp_sched_ratio = {
 	.get_subflow = ratio_get_available_subflow,
