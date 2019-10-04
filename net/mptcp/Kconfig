@@ -106,6 +106,14 @@ config MPTCP_RATIO
           This scheduler distributes packets between the sub-flows based on a
           user-defined (runtime-configurable from userspace) ratio.
 
+config MPTCP_MUSHER
+        tristate "MPTCP MuSher"
+        depends on (MPTCP=y)
+        select MPTCP_RATIO
+        ---help---
+         This scheduler attempts to a throughput-optimal scheduling based on the current
+         goodput estimates (among other things) of the subflows.
+
 choice
 	prompt "Default MPTCP Scheduler"
 	default DEFAULT
@@ -140,6 +148,11 @@ choice
                 ---help---
                   This distributes packets among subflows based on a pre-defined ratio.
 
+        config DEFAULT_MUSHER
+                bool "MuSher" if MPTCP_MUSHER=y
+                ---help---
+                 This distributes packets in proportion to the goodput of the underlying subflows.
+
 endchoice
 endif
 
@@ -151,5 +164,6 @@ config DEFAULT_MPTCP_SCHED
         default "redundant" if DEFAULT_REDUNDANT
         default "minrtt" if DEFAULT_RTT
         default "ratio" if DEFAULT_RATIO
+        default "musher" if DEFAULT_MUSHER
         default "default"
 

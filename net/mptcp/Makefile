@@ -22,6 +22,7 @@ obj-$(subst m,y,$(CONFIG_NET_MPTCP_SCHED_PROBE)) += mptcp_sched_probe_log_hook.o
 obj-$(CONFIG_NET_MPTCP_SCHED_PROBE) += mptcp_sched_probe.o
 obj-$(CONFIG_NET_MPTCP_QUEUE_PROBE) += mptcp_queue_probe.o
 obj-$(CONFIG_MPTCP_RATIO) += mptcp_ratio.o
+obj-$(CONFIG_MPTCP_MUSHER) += mptcp_musher.o
 
 mptcp-$(subst m,y,$(CONFIG_IPV6)) += mptcp_ipv6.o
 
