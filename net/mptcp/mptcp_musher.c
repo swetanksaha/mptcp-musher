@@ -1,6 +1,8 @@
 /* MPTCP Scheduler module selector. Highly inspired by tcp_cong.c */
 
 #include <linux/module.h>
+#include <linux/kprobes.h>
+#include <linux/slab.h>
 #include <net/mptcp.h>
 
 static unsigned char num_segments __read_mostly = 100;
@@ -10,6 +12,21 @@ MODULE_PARM_DESC(num_segments, "The number of consecutive segments that are part
 static bool cwnd_limited __read_mostly = 0;
 module_param(cwnd_limited, bool, 0644);
 MODULE_PARM_DESC(cwnd_limited, "if set to 1, the scheduler tries to fill the congestion-window on all subflows");
+
+struct mushersched_cb {
+        u64 prev_txbytes;
+        u64 prev_tstamp;
+};
+
+struct mushersched_priv {
+        unsigned char reserved; /* DO NOT USE. Used by mptcp_ratio */
+        struct mushersched_cb *musher_cb;
+};
+
+static struct mushersched_priv *mushersched_get_priv(const struct tcp_sock *tp)
+{
+        return (struct mushersched_priv *)&tp->mptcp->mptcp_sched[0];
+}
 
 /* We just look for any subflow that is available */
 static struct sock *musher_get_available_subflow(struct sock *meta_sk,
@@ -34,10 +51,53 @@ static struct mptcp_sched_ops mptcp_sched_musher = {
 	.owner = THIS_MODULE,
 };
 
+static void jtcp_set_state(struct sock *sk, int state)
+{
+        int oldstate = sk->sk_state;
+        const struct tcp_sock *tp = tcp_sk(sk);
+        struct mushersched_cb *m_cb = NULL;
+        
+        if (mptcp(tp) && !strcmp(tp->mpcb->sched_ops->name, mptcp_sched_musher.name)) {
+                switch(state) {
+                case TCP_ESTABLISHED:
+                        if (oldstate != TCP_ESTABLISHED && !is_meta_tp(tp)) {
+                                m_cb = (struct mushersched_cb *) kmalloc(sizeof(struct mushersched_cb), GFP_KERNEL);
+                                if (m_cb) mushersched_get_priv(tp)->musher_cb = m_cb;
+                        }
+                        break;
+
+                case TCP_TIME_WAIT:
+                case TCP_CLOSE:
+                        if (!is_meta_tp(tp)) {
+                                m_cb = mushersched_get_priv(tp)->musher_cb;
+                                if (m_cb) {
+                                        kfree(m_cb);
+                                        mushersched_get_priv(tp)->musher_cb = NULL;
+                                }
+                        }
+                        break;
+                }
+        }
+        jprobe_return();
+}
+
+static struct jprobe musher_jprobe = {
+        .kp = {
+                .symbol_name    = "tcp_set_state",
+        },
+        .entry  = jtcp_set_state,
+};
+
 static int __init musher_register(void)
 {
+        BUILD_BUG_ON(__same_type(tcp_set_state,
+                                 jtcp_set_state) == 0);
+
 	if (mptcp_register_scheduler(&mptcp_sched_musher))
 		return -1;
+
+        if (register_jprobe(&musher_jprobe))
+                return -2;
 
 	return 0;
 }
@@ -45,6 +105,7 @@ static int __init musher_register(void)
 static void musher_unregister(void)
 {
 	mptcp_unregister_scheduler(&mptcp_sched_musher);
+        unregister_jprobe(&musher_jprobe);
 }
 
 module_init(musher_register);
