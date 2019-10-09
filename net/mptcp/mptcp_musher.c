@@ -16,6 +16,8 @@ MODULE_PARM_DESC(cwnd_limited, "if set to 1, the scheduler tries to fill the con
 struct mushersched_cb {
         u64 prev_txbytes;
         u64 prev_tstamp;
+        u32 buffer_size;
+        u8 buf_size_acc;
 };
 
 struct mushersched_priv {
@@ -28,7 +30,7 @@ static struct mushersched_priv *mushersched_get_priv(const struct tcp_sock *tp)
         return (struct mushersched_priv *)&tp->mptcp->mptcp_sched[0];
 }
 
-static u64 get_mptcp_rate(struct sock *meta_sk)
+static u64 musher_get_rate(struct sock *meta_sk)
 {
         const struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
         struct sock *sk_it;
@@ -36,28 +38,29 @@ static u64 get_mptcp_rate(struct sock *meta_sk)
         struct rtnl_link_stats64 stats;
         struct netdev_queue *txq;
         struct mushersched_cb *m_cb;
+        char **devices;
         u64 rate = 0;
-
-        char **devices = kcalloc(mpcb->cnt_subflows, IFNAMSIZ, GFP_KERNEL);
         u8 idx, found, cnt = 0;
 
-        if (!devices) return rate;
+        if (!mpcb->cnt_subflows) return rate; 
+        devices = kcalloc(mpcb->cnt_subflows, IFNAMSIZ, GFP_KERNEL);
 
         mptcp_for_each_sk(mpcb, sk_it) {
-                m_cb = mushersched_get_priv(tcp_sk(sk_it))->musher_cb;       
+                m_cb = mushersched_get_priv(tcp_sk(sk_it))->musher_cb;
+                if (!m_cb) break;
+                
                 dst = sk_dst_get(sk_it);
-
                 if (dst && dst->dev) {
                         dev_get_stats(dst->dev, &stats);
                         txq = netdev_get_tx_queue(dst->dev, 0);
-
+                        
                         if (txq) {
                                 if (!m_cb->prev_txbytes) m_cb->prev_txbytes = stats.tx_bytes;
                                 if (!m_cb->prev_tstamp) m_cb->prev_tstamp = txq->trans_start;
-
+                                
                                 if (m_cb->prev_txbytes && m_cb->prev_tstamp && txq->trans_start != m_cb->prev_tstamp
                                         && jiffies_to_msecs(txq->trans_start - m_cb->prev_tstamp)) {
-                                    
+                                        
                                         found = 0;
                                         for(idx = 0; idx < cnt; idx++) {
                                                 if (!strcmp(devices[idx], dst->dev->name)) {
@@ -71,7 +74,7 @@ static u64 get_mptcp_rate(struct sock *meta_sk)
                                     m_cb->prev_txbytes = stats.tx_bytes;
                                     m_cb->prev_tstamp = txq->trans_start;
                                     devices[cnt] = dst->dev->name;
-                                    cnt += 1;
+                                    cnt++;
                                 }
                         }
 
@@ -81,6 +84,39 @@ static u64 get_mptcp_rate(struct sock *meta_sk)
         
         kfree(devices);
         return rate;
+}
+
+static void musher_update_buffer_size(struct sock *meta_sk)
+{
+        const struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
+        struct sock *sk_it;
+        struct tcp_sock *tp_it;
+        struct mushersched_cb *m_cb;
+
+        mptcp_for_each_sk(mpcb, sk_it) {
+                tp_it = tcp_sk(sk_it);
+                m_cb = mushersched_get_priv(tp_it)->musher_cb;
+                if (m_cb) {
+                        m_cb->buffer_size += (tp_it->write_seq - tp_it->snd_una);
+                        m_cb->buf_size_acc++;
+                }
+        }
+}
+
+static u32 musher_get_buffer_size(struct sock *sk)
+{
+        struct mushersched_cb *m_cb = mushersched_get_priv(tcp_sk(sk))->musher_cb;
+        u32 buf_size = 0;
+
+        if (m_cb && m_cb->buf_size_acc) {
+                buf_size = m_cb->buffer_size;
+                do_div(buf_size, m_cb->buf_size_acc);
+
+                m_cb->buffer_size = 0;
+                m_cb->buf_size_acc = 0;
+        }
+
+        return buf_size;
 }
 
 /* We just look for any subflow that is available */
@@ -96,7 +132,15 @@ static struct sk_buff *mptcp_musher_next_segment(struct sock *meta_sk,
 					     struct sock **subsk,
 					     unsigned int *limit)
 {
-        get_mptcp_rate(meta_sk);        
+        const struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;        
+        struct sock *sk_it;
+
+        musher_get_rate(meta_sk);
+        musher_update_buffer_size(meta_sk);
+        
+        mptcp_for_each_sk(mpcb, sk_it) {
+                musher_get_buffer_size(sk_it);
+        }
         return mptcp_ratio_next_segment(meta_sk, reinject, subsk, limit);
 }
 
