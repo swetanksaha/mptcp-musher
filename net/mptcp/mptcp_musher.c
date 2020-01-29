@@ -25,9 +25,47 @@ struct mushersched_priv {
         struct mushersched_cb *musher_cb;
 };
 
+typedef enum {
+        INIT_RIGHT,
+        RIGHT_RATIO_SET,
+        INIT_LEFT,
+        LEFT_RATIO_SET,
+        SEARCH_RATE
+}search_state;
+
+struct mushersched_meta_cb {
+        unsigned int last_tstamp;
+        u16 interval;
+        u64 last_rate;
+        u64 last_buf_size;
+        long long rate_diff;
+        long long buf_size_diff;
+        u8 rate_cnt;
+        u8 buf_size_cnt;
+        bool in_search;
+        u32 last_trigger_tstamp;
+        u64 ref_rate;
+        u64 ref_buf_size;
+        u8 ref_cnt;
+        search_state state;
+        u64 cur_rate;
+        u64 search_prev_rate;
+        int step;
+        u8 search_init_ratio;
+};
+
+struct mushersched_meta_priv {
+        struct mushersched_meta_cb *musher_meta_cb;
+};
+
 static struct mushersched_priv *mushersched_get_priv(const struct tcp_sock *tp)
 {
         return (struct mushersched_priv *)&tp->mptcp->mptcp_sched[0];
+}
+
+static struct mushersched_meta_priv *mushersched_get_meta_priv(const struct tcp_sock *tp)
+{
+	return (struct mushersched_meta_priv *)&tp->mpcb->mptcp_sched[0];
 }
 
 static u64 musher_get_rate(struct sock *meta_sk)
@@ -127,20 +165,166 @@ static struct sock *musher_get_available_subflow(struct sock *meta_sk,
         return ratio_get_available_subflow(meta_sk, skb, zero_wnd_test);
 }
 
+
+static void end_search(struct mushersched_meta_cb *m_meta_cb)
+{
+        m_meta_cb->in_search = false;
+        m_meta_cb->interval = 100;
+}
+
+static void find_optimal_ratio(struct mushersched_meta_cb *m_meta_cb, struct sock *meta_sk)
+{
+        switch(m_meta_cb->state) {
+               case INIT_RIGHT:
+                        if (m_meta_cb->search_init_ratio + m_meta_cb->step <= 95) {
+                                m_meta_cb->search_prev_rate = m_meta_cb->cur_rate;
+                                sysctl_num_segments_flow_one = m_meta_cb->search_init_ratio + m_meta_cb->step;
+                                m_meta_cb->state = RIGHT_RATIO_SET;
+                        }
+                        else m_meta_cb->state = INIT_LEFT;
+                        break;
+                
+                case RIGHT_RATIO_SET:
+                        if (m_meta_cb->cur_rate > m_meta_cb->search_prev_rate + 5000) {
+                                sysctl_num_segments_flow_one += m_meta_cb->step;
+                                m_meta_cb->search_prev_rate = m_meta_cb->cur_rate;
+                                m_meta_cb->state = SEARCH_RATE;
+                        }
+                        else m_meta_cb->state = INIT_LEFT;
+                        break;
+
+                case INIT_LEFT:
+                        if (m_meta_cb->search_init_ratio - m_meta_cb->step >= 5) {
+                                m_meta_cb->search_prev_rate = m_meta_cb->cur_rate;
+                                sysctl_num_segments_flow_one = m_meta_cb->search_init_ratio - m_meta_cb->step;
+                                m_meta_cb->state = LEFT_RATIO_SET;
+                        }
+                        else end_search(m_meta_cb);
+                        break;
+
+                case LEFT_RATIO_SET:
+                        if (m_meta_cb->cur_rate > m_meta_cb->search_prev_rate + 5000) {
+                                m_meta_cb->step = -5;
+                                sysctl_num_segments_flow_one += m_meta_cb->step;
+                                m_meta_cb->search_prev_rate = m_meta_cb->cur_rate;
+                                m_meta_cb->state = SEARCH_RATE;
+                        }
+                        else {
+                                sysctl_num_segments_flow_one -= m_meta_cb->step;
+                                end_search(m_meta_cb);
+                        }
+                        break;
+
+                case SEARCH_RATE:
+                        if (m_meta_cb->cur_rate < m_meta_cb->search_prev_rate) {
+                                sysctl_num_segments_flow_one -= m_meta_cb->step;
+                                end_search(m_meta_cb);
+                        }
+                        else {
+                                m_meta_cb->search_prev_rate = m_meta_cb->cur_rate;
+                                sysctl_num_segments_flow_one += m_meta_cb->step;
+                        }
+                        break;
+
+        }
+}
+
+static bool trigger_search(struct mushersched_meta_cb *m_meta_cb)
+{
+        m_meta_cb->rate_cnt = m_meta_cb->buf_size_cnt = m_meta_cb->last_rate = m_meta_cb->last_buf_size = m_meta_cb->rate_diff = m_meta_cb->buf_size_diff = m_meta_cb->ref_cnt = 0;
+        
+        if (jiffies_to_msecs(jiffies - m_meta_cb->last_trigger_tstamp) >= 3000) {
+                m_meta_cb->in_search = true;
+                m_meta_cb->interval = 200;
+                m_meta_cb->step = 5;
+                m_meta_cb->last_trigger_tstamp = jiffies;
+                m_meta_cb->state = INIT_RIGHT;
+                m_meta_cb->search_init_ratio = sysctl_num_segments_flow_one;
+        }
+
+        return m_meta_cb->in_search;
+}
+
 static struct sk_buff *mptcp_musher_next_segment(struct sock *meta_sk,
 					     int *reinject,
 					     struct sock **subsk,
 					     unsigned int *limit)
 {
         const struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;        
+        struct mushersched_meta_cb *m_meta_cb = mushersched_get_meta_priv(tcp_sk(meta_sk))->musher_meta_cb;
         struct sock *sk_it;
-
-        musher_get_rate(meta_sk);
-        musher_update_buffer_size(meta_sk);
         
-        mptcp_for_each_sk(mpcb, sk_it) {
-                musher_get_buffer_size(sk_it);
+        u64 cur_rate = 0, cur_buf_size = 0;
+       
+        musher_update_buffer_size(meta_sk);
+         
+        if (jiffies_to_msecs(jiffies - m_meta_cb->last_tstamp) > m_meta_cb->interval) {
+                cur_rate = musher_get_rate(meta_sk);
+                m_meta_cb->cur_rate = cur_rate;
+
+                mptcp_for_each_sk(mpcb, sk_it) {
+                        cur_buf_size += musher_get_buffer_size(sk_it); 
+                }
+
+                if (!m_meta_cb->in_search && !m_meta_cb->last_rate) {
+                        if (m_meta_cb->ref_cnt == 5) {
+                                do_div(m_meta_cb->ref_rate, 5);
+                                m_meta_cb->last_rate = m_meta_cb->ref_rate;
+
+                                do_div(m_meta_cb->ref_buf_size, 5);
+                                m_meta_cb->last_buf_size = m_meta_cb->ref_buf_size;
+
+                                m_meta_cb->ref_rate = m_meta_cb->ref_buf_size = m_meta_cb->ref_cnt = 0;
+                        }
+                        else {
+                                m_meta_cb->ref_rate += cur_rate;
+                                m_meta_cb->ref_buf_size += cur_buf_size;
+                                m_meta_cb->ref_cnt += 1;
+                        }
+
+                        goto exit;
+                }
+
+                m_meta_cb->rate_diff += cur_rate - m_meta_cb->last_rate;
+                m_meta_cb->buf_size_diff += cur_buf_size - m_meta_cb->last_buf_size;
+ 
+                if (!m_meta_cb->in_search) {
+                        /* Trigger if rate_diff threshold exceeded */
+                        if (abs(m_meta_cb->rate_diff) > 200000) {
+                                m_meta_cb->buf_size_cnt = 0;
+                                m_meta_cb->rate_cnt += 1;
+            
+                                if (m_meta_cb->rate_cnt == 3){
+                                        trigger_search(m_meta_cb)
+                                        goto exit;
+                                }
+                        }
+
+                        /* Trigger if buf_size_diff threshold exceeded */
+                        else if (m_meta_cb->buf_size_diff < -75000) {
+                                m_meta_cb->rate_cnt = 0;
+                                m_meta_cb->buf_size_cnt += 1;
+
+                                if (m_meta_cb->buf_size_cnt == 5) {
+                                        trigger_search(m_meta_cb)
+                                        goto exit;
+                                }
+                        }
+
+                        else {
+                                m_meta_cb->buf_size_cnt = 0;
+                                m_meta_cb->rate_cnt = 0;
+                        }
+
+                        m_meta_cb->last_rate = cur_rate;
+                        m_meta_cb->last_buf_size = cur_buf_size;
+                }
+                /* Searching for a new ratio */
+                else find_optimal_ratio(m_meta_cb, meta_sk);
+exit:
+                m_meta_cb->last_tstamp = jiffies;
         }
+
         return mptcp_ratio_next_segment(meta_sk, reinject, subsk, limit);
 }
 
@@ -156,19 +340,34 @@ static void jtcp_set_state(struct sock *sk, int state)
         int oldstate = sk->sk_state;
         const struct tcp_sock *tp = tcp_sk(sk);
         struct mushersched_cb *m_cb = NULL;
-        
+        struct mushersched_meta_cb *m_meta_cb = NULL;        
+
         if (mptcp(tp) && !strcmp(tp->mpcb->sched_ops->name, mptcp_sched_musher.name)) {
                 switch(state) {
                 case TCP_ESTABLISHED:
-                        if (oldstate != TCP_ESTABLISHED && !is_meta_tp(tp)) {
-                                m_cb = (struct mushersched_cb *) kcalloc(1, sizeof(struct mushersched_cb), GFP_KERNEL);
-                                if (m_cb) mushersched_get_priv(tp)->musher_cb = m_cb;
+                        if (oldstate != TCP_ESTABLISHED) {
+                                if (is_meta_tp(tp)) {
+                                        m_meta_cb = (struct mushersched_meta_cb *) kcalloc(1, sizeof(struct mushersched_meta_cb), GFP_KERNEL);
+                                        m_meta_cb->interval = 100;
+                                        if (m_meta_cb) mushersched_get_meta_priv(tp)->musher_meta_cb = m_meta_cb;
+                                }
+                                else {
+                                        m_cb = (struct mushersched_cb *) kcalloc(1, sizeof(struct mushersched_cb), GFP_KERNEL);
+                                        if (m_cb) mushersched_get_priv(tp)->musher_cb = m_cb;
+                                }
                         }
                         break;
 
                 case TCP_TIME_WAIT:
                 case TCP_CLOSE:
-                        if (!is_meta_tp(tp)) {
+                        if (is_meta_tp(tp)) {
+                                m_meta_cb = mushersched_get_meta_priv(tp)->musher_meta_cb;
+                                if (m_meta_cb) {
+                                        kfree(m_meta_cb);
+                                        mushersched_get_meta_priv(tp)->musher_meta_cb = NULL;
+                                }
+                        }
+                        else {
                                 m_cb = mushersched_get_priv(tp)->musher_cb;
                                 if (m_cb) {
                                         kfree(m_cb);
