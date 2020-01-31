@@ -177,8 +177,10 @@ static void end_search(struct mushersched_meta_cb *m_meta_cb)
 
 static void find_optimal_ratio(struct mushersched_meta_cb *m_meta_cb, struct sock *meta_sk)
 {
+        printk("Search Triggered!");
         switch(m_meta_cb->state) {
                case INIT_RIGHT:
+                        printk("INIT_RIGHT");
                         if (m_meta_cb->search_init_ratio + m_meta_cb->step <= 95) {
                                 m_meta_cb->search_prev_rate = m_meta_cb->cur_rate;
                                 sysctl_num_segments_flow_one = m_meta_cb->search_init_ratio + m_meta_cb->step;
@@ -188,6 +190,7 @@ static void find_optimal_ratio(struct mushersched_meta_cb *m_meta_cb, struct soc
                         break;
                 
                 case RIGHT_RATIO_SET:
+                        printk("RIGHT_RATIO_SET");
                         if (m_meta_cb->cur_rate > m_meta_cb->search_prev_rate + 5000) {
                                 sysctl_num_segments_flow_one += m_meta_cb->step;
                                 m_meta_cb->search_prev_rate = m_meta_cb->cur_rate;
@@ -197,6 +200,7 @@ static void find_optimal_ratio(struct mushersched_meta_cb *m_meta_cb, struct soc
                         break;
 
                 case INIT_LEFT:
+                        printk("INIT_LEFT");
                         if (m_meta_cb->search_init_ratio - m_meta_cb->step >= 5) {
                                 m_meta_cb->search_prev_rate = m_meta_cb->cur_rate;
                                 sysctl_num_segments_flow_one = m_meta_cb->search_init_ratio - m_meta_cb->step;
@@ -206,6 +210,7 @@ static void find_optimal_ratio(struct mushersched_meta_cb *m_meta_cb, struct soc
                         break;
 
                 case LEFT_RATIO_SET:
+                        printk("LEFT_RATIO_SET");
                         if (m_meta_cb->cur_rate > m_meta_cb->search_prev_rate + 5000) {
                                 m_meta_cb->step = -5;
                                 sysctl_num_segments_flow_one += m_meta_cb->step;
@@ -219,6 +224,7 @@ static void find_optimal_ratio(struct mushersched_meta_cb *m_meta_cb, struct soc
                         break;
 
                 case SEARCH_RATE:
+                        printk("SEARCH_RATE");
                         if (m_meta_cb->cur_rate < m_meta_cb->search_prev_rate) {
                                 sysctl_num_segments_flow_one -= m_meta_cb->step;
                                 end_search(m_meta_cb);
@@ -234,7 +240,7 @@ static void find_optimal_ratio(struct mushersched_meta_cb *m_meta_cb, struct soc
 
 static bool trigger_search(struct mushersched_meta_cb *m_meta_cb)
 {
-        m_meta_cb->rate_cnt = m_meta_cb->buf_size_cnt = m_meta_cb->last_rate = m_meta_cb->last_buf_size = m_meta_cb->rate_diff = m_meta_cb->buf_size_diff = m_meta_cb->ref_cnt = 0;
+        m_meta_cb->rate_cnt = m_meta_cb->buf_size_cnt = m_meta_cb->last_rate = m_meta_cb->last_buf_size = m_meta_cb->buf_size_diff = m_meta_cb->ref_cnt = 0;
         
         if (jiffies_to_msecs(jiffies - m_meta_cb->last_trigger_tstamp) >= 3000) {
                 m_meta_cb->in_search = true;
@@ -265,6 +271,7 @@ static struct sk_buff *mptcp_musher_next_segment(struct sock *meta_sk,
                 cur_rate = musher_get_rate(meta_sk);
                 m_meta_cb->cur_rate = cur_rate;
 
+                printk("cur_rate: %lld, last_rate: %lld, cur_ratio: %u, rate_diff: %lld, %d", cur_rate, m_meta_cb->last_rate, sysctl_num_segments_flow_one, m_meta_cb->rate_diff, m_meta_cb->in_search);
                 mptcp_for_each_sk(mpcb, sk_it) {
                         cur_buf_size += musher_get_buffer_size(sk_it); 
                 }
@@ -273,11 +280,12 @@ static struct sk_buff *mptcp_musher_next_segment(struct sock *meta_sk,
                         if (m_meta_cb->ref_cnt == 5) {
                                 do_div(m_meta_cb->ref_rate, 5);
                                 m_meta_cb->last_rate = m_meta_cb->ref_rate;
+                                printk("ref_rate: %llu", m_meta_cb->ref_rate);
 
                                 do_div(m_meta_cb->ref_buf_size, 5);
                                 m_meta_cb->last_buf_size = m_meta_cb->ref_buf_size;
 
-                                m_meta_cb->ref_rate = m_meta_cb->ref_buf_size = m_meta_cb->ref_cnt = 0;
+                                m_meta_cb->ref_rate = m_meta_cb->ref_buf_size = m_meta_cb->ref_cnt = m_meta_cb->rate_diff = 0;
                         }
                         else {
                                 m_meta_cb->ref_rate += cur_rate;
@@ -293,11 +301,13 @@ static struct sk_buff *mptcp_musher_next_segment(struct sock *meta_sk,
  
                 if (!m_meta_cb->in_search) {
                         /* Trigger if rate_diff threshold exceeded */
+                        printk("abs: %lld", abs(m_meta_cb->rate_diff));
                         if (abs(m_meta_cb->rate_diff) > 200000) {
                                 m_meta_cb->buf_size_cnt = 0;
                                 m_meta_cb->rate_cnt += 1;
             
                                 if (m_meta_cb->rate_cnt == 5){
+                                        printk("Potential rate trigger!");
                                         trigger_search(m_meta_cb);
                                         goto exit;
                                 }
@@ -309,6 +319,7 @@ static struct sk_buff *mptcp_musher_next_segment(struct sock *meta_sk,
                                 m_meta_cb->buf_size_cnt += 1;
 
                                 if (m_meta_cb->buf_size_cnt == 5) {
+                                        printk("Potential buffer trigger!");
                                         trigger_search(m_meta_cb);
                                         goto exit;
                                 }
