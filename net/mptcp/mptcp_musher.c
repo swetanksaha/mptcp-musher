@@ -13,6 +13,9 @@ static bool cwnd_limited __read_mostly = 0;
 module_param(cwnd_limited, bool, 0644);
 MODULE_PARM_DESC(cwnd_limited, "if set to 1, the scheduler tries to fill the congestion-window on all subflows");
 
+u16 regular_interval = 100;
+u16 search_interval = 200;
+
 struct mushersched_cb {
         u64 prev_txbytes;
         u64 prev_tstamp;
@@ -169,7 +172,7 @@ static struct sock *musher_get_available_subflow(struct sock *meta_sk,
 static void end_search(struct mushersched_meta_cb *m_meta_cb)
 {
         m_meta_cb->in_search = false;
-        m_meta_cb->interval = 100;
+        m_meta_cb->interval = regular_interval;
 }
 
 static void find_optimal_ratio(struct mushersched_meta_cb *m_meta_cb, struct sock *meta_sk)
@@ -235,7 +238,7 @@ static bool trigger_search(struct mushersched_meta_cb *m_meta_cb)
         
         if (jiffies_to_msecs(jiffies - m_meta_cb->last_trigger_tstamp) >= 3000) {
                 m_meta_cb->in_search = true;
-                m_meta_cb->interval = 200;
+                m_meta_cb->interval = search_interval;
                 m_meta_cb->step = 5;
                 m_meta_cb->last_trigger_tstamp = jiffies;
                 m_meta_cb->state = INIT_RIGHT;
@@ -294,8 +297,8 @@ static struct sk_buff *mptcp_musher_next_segment(struct sock *meta_sk,
                                 m_meta_cb->buf_size_cnt = 0;
                                 m_meta_cb->rate_cnt += 1;
             
-                                if (m_meta_cb->rate_cnt == 3){
-                                        trigger_search(m_meta_cb)
+                                if (m_meta_cb->rate_cnt == 5){
+                                        trigger_search(m_meta_cb);
                                         goto exit;
                                 }
                         }
@@ -306,7 +309,7 @@ static struct sk_buff *mptcp_musher_next_segment(struct sock *meta_sk,
                                 m_meta_cb->buf_size_cnt += 1;
 
                                 if (m_meta_cb->buf_size_cnt == 5) {
-                                        trigger_search(m_meta_cb)
+                                        trigger_search(m_meta_cb);
                                         goto exit;
                                 }
                         }
@@ -348,7 +351,7 @@ static void jtcp_set_state(struct sock *sk, int state)
                         if (oldstate != TCP_ESTABLISHED) {
                                 if (is_meta_tp(tp)) {
                                         m_meta_cb = (struct mushersched_meta_cb *) kcalloc(1, sizeof(struct mushersched_meta_cb), GFP_KERNEL);
-                                        m_meta_cb->interval = 100;
+                                        m_meta_cb->interval = regular_interval;
                                         if (m_meta_cb) mushersched_get_meta_priv(tp)->musher_meta_cb = m_meta_cb;
                                 }
                                 else {
